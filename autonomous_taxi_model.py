@@ -50,9 +50,12 @@ class SimulationTrace:
     time_s: np.ndarray
     lead_position_m: np.ndarray
     follower_position_m: np.ndarray
+    lead_lateral_m: np.ndarray
+    follower_lateral_m: np.ndarray
     lead_speed_mps: np.ndarray
     follower_speed_mps: np.ndarray
     gap_m: np.ndarray
+    avoidance_active: np.ndarray
     alert_delay_s: float
     collision: bool
 
@@ -212,13 +215,60 @@ def simulate_emergency_braking(
 
     lead_pos = np.zeros_like(t)
     follower_pos = np.zeros_like(t)
+    lead_y = np.zeros_like(t)
+    follower_y = np.zeros_like(t)
     lead_speed = np.zeros_like(t)
     follower_speed = np.zeros_like(t)
+    avoidance = np.zeros_like(t, dtype=bool)
+
+    lane_width_m = 3.6
+    vehicle_width_m = 1.9
+    lane_change_duration_s = 1.1
+    lane_change_trigger_buffer_s = 0.35
+    bypass_min_speed_mps = max(2.0, 0.22 * v0)
+    overlap_clearance_m = 1.2
 
     lead_pos[0] = 0.0
     follower_pos[0] = -(initial_gap_m + params.vehicle_length_m)
     lead_speed[0] = 0.0 if sudden_stop_lead else v0_lead
     follower_speed[0] = v0
+    lead_y[0] = 0.0
+    follower_y[0] = 0.0
+
+    lane_change_started = False
+    lane_change_t0 = 0.0
+    y_start = 0.0
+    y_target = lane_width_m
+
+    def has_overlap_1d(c1: float, size1: float, c2: float, size2: float) -> bool:
+        return abs(c1 - c2) < 0.5 * (size1 + size2)
+
+    def lead_decel_cap() -> float:
+        if np.isinf(a_lead):
+            return np.inf
+        return a_lead
+
+    def collision_is_inevitable(x_lead: float, x_follow: float, v_lead_now: float, v_follow_now: float) -> bool:
+        current_gap = x_lead - (x_follow + params.vehicle_length_m)
+        if current_gap <= 0:
+            return True
+        follower_stop = v_follow_now**2 / (2.0 * a_max) if a_max > 0 else np.inf
+        if np.isinf(lead_decel_cap()):
+            leader_stop = 0.0
+        else:
+            leader_stop = v_lead_now**2 / (2.0 * lead_decel_cap())
+        # If even immediate full braking cannot preserve positive longitudinal clearance,
+        # trigger evasive maneuver in addition to braking.
+        return (current_gap + leader_stop - follower_stop) < 0.8
+
+    def ttc_seconds(x_lead: float, x_follow: float, v_lead_now: float, v_follow_now: float) -> float:
+        current_gap = x_lead - (x_follow + params.vehicle_length_m)
+        closing_speed = v_follow_now - v_lead_now
+        if current_gap <= 0:
+            return 0.0
+        if closing_speed <= 1e-6:
+            return np.inf
+        return current_gap / closing_speed
 
     for i in range(1, n_steps):
         if sudden_stop_lead:
@@ -229,21 +279,75 @@ def simulate_emergency_braking(
             lead_speed[i] = max(lead_speed[i - 1] + lead_acc * dt_s, 0.0)
             lead_pos[i] = lead_pos[i - 1] + lead_speed[i - 1] * dt_s
 
-        follower_acc = -a_max if (t[i - 1] >= alert_delay and follower_speed[i - 1] > 0) else 0.0
+        same_lane = has_overlap_1d(
+            lead_y[i - 1],
+            vehicle_width_m,
+            follower_y[i - 1],
+            vehicle_width_m,
+        )
+        if (
+            not lane_change_started
+            and same_lane
+            and collision_is_inevitable(lead_pos[i - 1], follower_pos[i - 1], lead_speed[i - 1], follower_speed[i - 1])
+        ):
+            lane_change_started = True
+            lane_change_t0 = t[i - 1]
+            y_start = follower_y[i - 1]
+
+        if lane_change_started:
+            # Keep bypass moving, but prevent rear-end while lateral overlap is still significant.
+            lateral_sep = abs(lead_y[i - 1] - follower_y[i - 1])
+            same_conflict_zone = lateral_sep < vehicle_width_m
+            gap_now = lead_pos[i - 1] - (follower_pos[i - 1] + params.vehicle_length_m)
+            target_gap = overlap_clearance_m if same_conflict_zone else 0.0
+            ttc_now = ttc_seconds(lead_pos[i - 1], follower_pos[i - 1], lead_speed[i - 1], follower_speed[i - 1])
+
+            if same_conflict_zone and ttc_now < (lane_change_duration_s + 0.15) and follower_speed[i - 1] > lead_speed[i - 1]:
+                follower_acc = -a_max
+            elif same_conflict_zone and gap_now < target_gap and follower_speed[i - 1] > lead_speed[i - 1]:
+                follower_acc = -a_max
+            elif same_conflict_zone and follower_speed[i - 1] > (lead_speed[i - 1] + 0.8):
+                follower_acc = -0.45 * a_max
+            else:
+                follower_acc = 0.0
+
+            projected_v = follower_speed[i - 1] + follower_acc * dt_s
+            if projected_v < bypass_min_speed_mps:
+                follower_acc = (bypass_min_speed_mps - follower_speed[i - 1]) / dt_s
+        elif t[i - 1] >= alert_delay and follower_speed[i - 1] > 0:
+            follower_acc = -a_max
+        else:
+            follower_acc = 0.0
         follower_speed[i] = max(follower_speed[i - 1] + follower_acc * dt_s, 0.0)
         follower_pos[i] = follower_pos[i - 1] + follower_speed[i - 1] * dt_s
 
+        if lane_change_started:
+            tau = (t[i] - lane_change_t0) / lane_change_duration_s
+            tau = float(np.clip(tau, 0.0, 1.0))
+            smooth_tau = tau * tau * (3.0 - 2.0 * tau)
+            follower_y[i] = y_start + (y_target - y_start) * smooth_tau
+            avoidance[i] = True
+        else:
+            follower_y[i] = follower_y[i - 1]
+
+        lead_y[i] = lead_y[i - 1]
+
     # Gap is bumper-to-bumper distance: lead rear minus follower front.
     gap = lead_pos - (follower_pos + params.vehicle_length_m)
-    collided = bool(np.any(gap <= 0.0))
+    overlap_x = np.abs(lead_pos - follower_pos) < params.vehicle_length_m
+    overlap_y = np.abs(lead_y - follower_y) < vehicle_width_m
+    collided = bool(np.any(overlap_x & overlap_y))
 
     return SimulationTrace(
         time_s=t,
         lead_position_m=lead_pos,
         follower_position_m=follower_pos,
+        lead_lateral_m=lead_y,
+        follower_lateral_m=follower_y,
         lead_speed_mps=lead_speed,
         follower_speed_mps=follower_speed,
         gap_m=gap,
+        avoidance_active=avoidance,
         alert_delay_s=alert_delay,
         collision=collided,
     )

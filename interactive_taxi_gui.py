@@ -7,7 +7,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
 from matplotlib.figure import Figure
-from matplotlib.patches import Rectangle
+from matplotlib.patches import Circle, FancyBboxPatch, Polygon
 from PySide6.QtCore import QTimer, Qt
 from PySide6.QtWidgets import (
     QAbstractSpinBox,
@@ -85,13 +85,21 @@ class TaxiQtWindow(QMainWindow):
         self.ax_gap.axhline(0, color="#e74c3c", linestyle="--", linewidth=1.2, label="Столкновение")
 
         self.car_len = 4.6
-        self.lead_car = Rectangle((0, -0.45), self.car_len, 0.8, color="#0b84f3", alpha=0.95)
-        self.follow_car = Rectangle((0, -1.55), self.car_len, 0.8, color="#f39c12", alpha=0.95)
-        self.ax_scene.add_patch(self.lead_car)
-        self.ax_scene.add_patch(self.follow_car)
-        self.scene_text = self.ax_scene.text(0.02, 0.97, "", va="top", transform=self.ax_scene.transAxes, fontsize=10)
+        self.car_width = 1.9
+        self.lead_car = self._build_car_artist("#0b84f3", "#083d77")
+        self.follow_car = self._build_car_artist("#f39c12", "#9a5e00")
+        self.ax_scene.axvspan(-1.8, 5.4, color="#e5e7eb", alpha=0.45)
+        self.ax_scene.axvline(1.8, color="#475569", linewidth=1.0, linestyle=(0, (6, 5)))
+        self.ax_scene.axvline(-1.8, color="#334155", linewidth=1.2)
+        self.ax_scene.axvline(5.4, color="#334155", linewidth=1.2)
 
         right_layout.addWidget(self.canvas, 1)
+
+        self.scene_status = QLabel()
+        self.scene_status.setWordWrap(True)
+        self.scene_status.setAlignment(Qt.AlignmentFlag.AlignTop)
+        self.scene_status.setStyleSheet("font-size: 12px; color: #1f2937; background: #f8fafc; border: 1px solid #dbe2ea; border-radius: 8px; padding: 6px;")
+        right_layout.addWidget(self.scene_status)
 
         self.summary = QLabel()
         self.summary.setWordWrap(True)
@@ -130,6 +138,92 @@ class TaxiQtWindow(QMainWindow):
             QPushButton#warning { background: #ffc107; color: #222; }
             QPushButton#warning:hover { background: #ffca2c; }
             """
+        )
+
+    def _build_car_artist(self, body_color: str, roof_color: str) -> dict[str, FancyBboxPatch | Circle | Polygon]:
+        body = FancyBboxPatch(
+            (0.0, 0.0),
+            self.car_width,
+            self.car_len,
+            boxstyle="round,pad=0.03,rounding_size=0.28",
+            facecolor=body_color,
+            edgecolor="#1f2937",
+            linewidth=1.0,
+            alpha=0.97,
+        )
+        roof = FancyBboxPatch(
+            (0.0, 0.0),
+            self.car_width * 0.58,
+            self.car_len * 0.5,
+            boxstyle="round,pad=0.01,rounding_size=0.18",
+            facecolor=roof_color,
+            edgecolor="none",
+            alpha=0.9,
+        )
+        windshield = FancyBboxPatch(
+            (0.0, 0.0),
+            self.car_width * 0.42,
+            self.car_len * 0.22,
+            boxstyle="round,pad=0.01,rounding_size=0.08",
+            facecolor="#e0f2fe",
+            edgecolor="none",
+            alpha=0.85,
+        )
+        light_front = Circle((0.0, 0.0), radius=0.08, facecolor="#fef3c7", edgecolor="none", alpha=0.95)
+        light_rear = Circle((0.0, 0.0), radius=0.08, facecolor="#fecaca", edgecolor="none", alpha=0.95)
+        direction_marker = Polygon([(0.0, 0.0), (0.0, 0.0), (0.0, 0.0)], closed=True, facecolor="#ffffff", edgecolor="none", alpha=0.85)
+
+        self.ax_scene.add_patch(body)
+        self.ax_scene.add_patch(roof)
+        self.ax_scene.add_patch(windshield)
+        self.ax_scene.add_patch(light_front)
+        self.ax_scene.add_patch(light_rear)
+        self.ax_scene.add_patch(direction_marker)
+        return {
+            "body": body,
+            "roof": roof,
+            "windshield": windshield,
+            "light_front": light_front,
+            "light_rear": light_rear,
+            "direction_marker": direction_marker,
+        }
+
+    def _set_car_pose(self, car: dict[str, FancyBboxPatch | Circle | Polygon], x_center: float, y_rear: float) -> None:
+        x_left = x_center - self.car_width / 2.0
+        y_bottom = y_rear
+
+        body = car["body"]
+        roof = car["roof"]
+        windshield = car["windshield"]
+        light_front = car["light_front"]
+        light_rear = car["light_rear"]
+        direction_marker = car["direction_marker"]
+
+        body.set_x(x_left)
+        body.set_y(y_bottom)
+
+        roof_w = self.car_width * 0.58
+        roof_h = self.car_len * 0.5
+        roof_x = x_center - roof_w / 2.0
+        roof_y = y_bottom + (self.car_len - roof_h) * 0.5
+        roof.set_x(roof_x)
+        roof.set_y(roof_y)
+
+        ws_w = self.car_width * 0.42
+        ws_h = self.car_len * 0.22
+        ws_x = x_center - ws_w / 2.0
+        ws_y = y_bottom + self.car_len - ws_h - 0.28
+        windshield.set_x(ws_x)
+        windshield.set_y(ws_y)
+
+        light_front.center = (x_center, y_bottom + self.car_len - 0.22)
+        light_rear.center = (x_center, y_bottom + 0.22)
+        direction_marker.set_xy(
+            [
+                (x_center, y_bottom + self.car_len - 0.36),
+                (x_center + 0.16, y_bottom + self.car_len - 0.86),
+                (x_center - 0.16, y_bottom + self.car_len - 0.86),
+            ]
         )
 
     def _build_controls_panel(self) -> QWidget:
@@ -303,16 +397,16 @@ class TaxiQtWindow(QMainWindow):
         self.ax_gap.legend(loc="upper right")
 
         self.ax_scene.set_title("Анимация движения", fontsize=12, fontweight="bold")
-        self.ax_scene.set_xlabel("Координата по дороге, м")
-        self.ax_scene.set_yticks([])
-        self.ax_scene.set_ylim(-2.1, 0.8)
-        self.ax_scene.set_xlim(
+        self.ax_scene.set_xlabel("Координата Y, м")
+        self.ax_scene.set_ylabel("Координата X, м")
+        self.ax_scene.set_xticks([-1.8, 0.0, 1.8, 3.6])
+        self.ax_scene.set_xlim(-2.6, 6.2)
+        self.ax_scene.set_aspect("equal", adjustable="box")
+        self.ax_scene.set_ylim(
             float(np.min(self.trace.follower_position_m) - 2.0),
             float(np.max(self.trace.lead_position_m) + self.car_len + 2.0),
         )
         self.ax_scene.grid(alpha=0.15)
-        self.ax_scene.axhline(-0.85, color="#95a5a6", linewidth=1.1)
-        self.ax_scene.axhline(0.15, color="#95a5a6", linewidth=1.1)
 
         status = "ОПАСНО: столкновение" if self.trace.collision else "Без столкновения"
         self.summary.setStyleSheet(
@@ -329,6 +423,7 @@ class TaxiQtWindow(QMainWindow):
                         f"k_rel = {result.reliability_factor:.3f}"
                     ),
                     f"Начальный интервал = {self.start_gap.value():.2f} м, задержка оповещения = {self.trace.alert_delay_s:.2f} с",
+                    f"Маневр объезда: {'АКТИВИРОВАН' if bool(np.any(self.trace.avoidance_active)) else 'не требуется'}",
                     f"Статус сценария: {status}",
                     f"Скорость проигрывания: x{self.playback.value():.1f}",
                 ]
@@ -341,21 +436,27 @@ class TaxiQtWindow(QMainWindow):
 
         lead_x = float(np.interp(t_now, t, self.trace.lead_position_m))
         follow_x = float(np.interp(t_now, t, self.trace.follower_position_m))
+        lead_y = float(np.interp(t_now, t, self.trace.lead_lateral_m))
+        follow_y = float(np.interp(t_now, t, self.trace.follower_lateral_m))
         gap = float(np.interp(t_now, t, self.trace.gap_m))
         lead_v_kmh = float(np.interp(t_now, t, self.trace.lead_speed_mps) * 3.6)
         follow_v_kmh = float(np.interp(t_now, t, self.trace.follower_speed_mps) * 3.6)
+        avoid_now = bool(np.interp(t_now, t, self.trace.avoidance_active.astype(float)) > 0.5)
 
-        self.lead_car.set_x(lead_x)
-        self.follow_car.set_x(follow_x)
+        self._set_car_pose(self.lead_car, lead_y, lead_x)
+        self._set_car_pose(self.follow_car, follow_y, follow_x)
         self.speed_cursor.set_xdata([t_now, t_now])
         self.gap_cursor.set_xdata([t_now, t_now])
 
-        collision_now = "ДА" if gap <= 0 else "НЕТ"
-        self.scene_text.set_text(
+        overlap_x = abs(lead_x - follow_x) < self.car_len
+        overlap_y = abs(lead_y - follow_y) < self.car_width
+        collision_now = "ДА" if (overlap_x and overlap_y) else "НЕТ"
+        self.scene_status.setText(
             f"t = {t_now:.2f} с\n"
             f"v_лид = {lead_v_kmh:.1f} км/ч\n"
             f"v_след = {follow_v_kmh:.1f} км/ч\n"
             f"интервал = {gap:.2f} м\n"
+            f"объезд: {'да' if avoid_now else 'нет'}\n"
             f"столкновение сейчас: {collision_now}"
         )
 
