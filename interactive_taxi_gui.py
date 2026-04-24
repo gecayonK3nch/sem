@@ -168,7 +168,7 @@ class TaxiQtWindow(QMainWindow):
         sim_form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.AllNonFixedFieldsGrow)
         self.duration = self._double(3.5, 1.0, 20.0, 0.5)
         self.dt = self._double(0.02, 0.005, 0.2, 0.005)
-        self.playback = self._double(8.0, 0.5, 20.0, 0.5)
+        self.playback = self._double(1.0, 0.5, 20.0, 0.5)
 
         sim_form.addRow("Длительность (с)", self.duration)
         sim_form.addRow("Шаг dt (с)", self.dt)
